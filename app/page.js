@@ -124,8 +124,7 @@ export default function Page() {
         interesting: j.data?.interesting,
         github: j.data?.hits
       });
-      const n = (j.data?.subdomains || []).length;
-      log(`${src.id}: ${n} subs`);
+      log(`${src.id}: ${(j.data?.subdomains || []).length} subs`);
     } catch (e) {
       setStatus((s) => ({ ...s, [src.id]: "fail" }));
       log(`${src.id}: ${e.message}`);
@@ -175,9 +174,15 @@ export default function Page() {
       } catch (e) {
         log(`scan ${item.host}: ${e.message}`);
       }
-    }
-    if (health?.worker) {
-      log("WORKER_URL set — full Nuclei can run on the worker host, not on Vercel.");
+      if (health?.worker) {
+        try {
+          const n = await post("/api/nuclei", { domain: root, host: item.host });
+          merge({ findings: n.findings || [] });
+          log(`nuclei ${item.host}: ${(n.findings || []).length} hits`);
+        } catch (e) {
+          log(`nuclei ${item.host}: ${e.message}`);
+        }
+      }
     }
   }
 
@@ -221,8 +226,8 @@ export default function Page() {
     }
   }
 
-  function setFindingStatus(id, status) {
-    const list = bag.current.findings.map((f) => f.id === id ? { ...f, status } : f);
+  function setFindingStatus(id, next) {
+    const list = bag.current.findings.map((f) => f.id === id ? { ...f, status: next } : f);
     bag.current.findings = list;
     setFindings(list);
   }
@@ -259,12 +264,11 @@ export default function Page() {
           Nuclei worker: {health?.worker ? "configured" : "not attached"}
         </p>
       </aside>
-
       <main className="main">
         {tab === "workbench" && (
           <>
             <h1>Pipeline</h1>
-            <p className="muted">Phase 1 collects assets. Phase 3 only then scans ranked hosts with HTTP templates. Full Nuclei stays on the optional worker.</p>
+            <p className="muted">Phase 1 collects assets. Phase 3 scans ranked hosts. Full Nuclei only if a worker is attached.</p>
             <div className="banner">Authorized targets only. Template hits are leads, not finished bounty reports.</div>
             <div className="row">
               <input type="text" placeholder="target.com" value={domain} onChange={(e) => setDomain(e.target.value)} />
@@ -284,14 +288,10 @@ export default function Page() {
               <input type="checkbox" checked={authorized} onChange={(e) => setAuthorized(e.target.checked)} />
               I am authorized to recon and send HTTP checks to this domain and its in-scope hosts.
             </label>
-            <div className="phase">
-              {PHASES.map((p) => <span key={p.id} className={`chip ${phase === p.id ? "on" : ""}`}>{p.label}</span>)}
-            </div>
+            <div className="phase">{PHASES.map((p) => <span key={p.id} className={`chip ${phase === p.id ? "on" : ""}`}>{p.label}</span>)}</div>
             <div className="phase">
               {sources.map((s) => (
-                <span key={s.id} className={`chip ${status[s.id] === "ok" ? "on" : status[s.id] === "fail" ? "fail" : ""}`}>
-                  {s.label}{s.needsKey ? " · key" : ""}
-                </span>
+                <span key={s.id} className={`chip ${status[s.id] === "ok" ? "on" : status[s.id] === "fail" ? "fail" : ""}`}>{s.label}{s.needsKey ? " · key" : ""}</span>
               ))}
             </div>
             <div className="grid">
@@ -304,7 +304,6 @@ export default function Page() {
             <pre>{(assets.ranked || []).map((r) => `${r.score}\t${r.host}`).join("\n") || "run recon first"}</pre>
           </>
         )}
-
         {tab === "assets" && (
           <>
             <h1>Assets</h1>
@@ -316,11 +315,8 @@ export default function Page() {
             <pre>{assets.subdomains.join("\n") || "none"}</pre>
             <h3>Interesting URLs</h3>
             <pre>{(assets.interesting || []).join("\n") || "none"}</pre>
-            <h3>GitHub</h3>
-            <pre>{(assets.github || []).map((g) => `${g.repo} ${g.path}`).join("\n") || "none"}</pre>
           </>
         )}
-
         {tab === "findings" && (
           <>
             <h1>Findings</h1>
@@ -353,27 +349,21 @@ export default function Page() {
             </table>
           </>
         )}
-
         {tab === "report" && (
           <>
             <h1>Report {usedLlm ? "· LLM" : "· local"}</h1>
-            <div className="row">
-              <button className="ghost" onClick={() => download(`${domain || "target"}-report.md`, report || "")}>Download .md</button>
-            </div>
+            <button className="ghost" onClick={() => download(`${domain || "target"}-report.md`, report || "")}>Download .md</button>
             <pre>{report || "Run the pipeline to draft a report."}</pre>
           </>
         )}
-
         {tab === "limits" && (
           <>
             <h1>Coverage</h1>
-            <p>Vercel runs recon APIs + an HTTP template engine ({health?.templates || 0} checks). That is the accurate serverless half.</p>
-            <p>ProjectDiscovery Nuclei with the public template pack needs a host that can execute binaries. Attach it with <code>WORKER_URL</code> after you run <code>worker/</code> on a VPS. Do not expect nmap/nuclei inside this Vercel function.</p>
-            <p>File only what you reproduced. Template matches on generic paths are often noise.</p>
+            <p>Vercel: recon APIs + HTTP templates. Nuclei public pack: worker on a VPS.</p>
+            <p>File only what you reproduced.</p>
           </>
         )}
       </main>
-
       <aside className="rail">
         <h3>Live log</h3>
         <pre style={{ minHeight: 320 }}>{logs.join("\n") || "idle"}</pre>
