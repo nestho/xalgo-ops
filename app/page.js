@@ -1,150 +1,241 @@
 "use client";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 const PHASES = [
-  { id: "osint", label: "OSINT" },
-  { id: "subdomains", label: "Subdomains" },
-  { id: "dns", label: "DNS" },
-  { id: "content", label: "Archives" },
-  { id: "probe", label: "HTTP probe" },
-  { id: "report", label: "Report" }
+  { id: "recon", label: "1 Recon" },
+  { id: "dns", label: "2 DNS intel" },
+  { id: "vuln", label: "3 Vuln scan" },
+  { id: "report", label: "4 Report" }
 ];
+
+const emptyAssets = () => ({ subdomains: [], hosts: [], urls: [], emails: [], paths: [], interesting: [], github: [], internetdb: [], ranked: [], dns: {} });
 
 export default function Page() {
   const [tab, setTab] = useState("workbench");
   const [domain, setDomain] = useState("");
   const [authorized, setAuthorized] = useState(false);
+  const [pack, setPack] = useState("quick");
+  const [hostLimit, setHostLimit] = useState(8);
   const [health, setHealth] = useState(null);
   const [running, setRunning] = useState(false);
+  const [phase, setPhase] = useState("idle");
   const [logs, setLogs] = useState([]);
   const [status, setStatus] = useState({});
-  const [assets, setAssets] = useState({ subdomains: [], hosts: [], urls: [], emails: [], paths: [], interesting: [], github: [], internetdb: [] });
+  const [assets, setAssets] = useState(emptyAssets());
   const [findings, setFindings] = useState([]);
   const [report, setReport] = useState("");
   const [usedLlm, setUsedLlm] = useState(false);
+  const [filter, setFilter] = useState("all");
+  const bag = useRef({ assets: emptyAssets(), findings: [] });
 
   useEffect(() => {
     fetch("/api/health").then((r) => r.json()).then(setHealth).catch(() => {});
-    const saved = localStorage.getItem("xalgo-ops");
+    const saved = localStorage.getItem("xalgo-ops-v11");
     if (saved) {
       try {
         const j = JSON.parse(saved);
         setDomain(j.domain || "");
-        setAssets(j.assets || { subdomains: [], hosts: [], urls: [], emails: [], paths: [], interesting: [], github: [], internetdb: [] });
+        setAssets(j.assets || emptyAssets());
         setFindings(j.findings || []);
         setReport(j.report || "");
+        bag.current.assets = j.assets || emptyAssets();
+        bag.current.findings = j.findings || [];
       } catch {}
     }
   }, []);
 
   useEffect(() => {
-    localStorage.setItem("xalgo-ops", JSON.stringify({ domain, assets, findings, report }));
+    localStorage.setItem("xalgo-ops-v11", JSON.stringify({ domain, assets, findings, report }));
   }, [domain, assets, findings, report]);
 
   const sources = health?.sources || [];
 
   function log(msg) {
-    setLogs((l) => [`${new Date().toISOString().slice(11, 19)}  ${msg}`, ...l].slice(0, 80));
+    setLogs((l) => [`${new Date().toISOString().slice(11, 19)}  ${msg}`, ...l].slice(0, 120));
   }
 
   function merge(next) {
-    setAssets((prev) => {
-      const u = (a, b) => [...new Set([...(a || []), ...(b || [])])];
-      return {
-        subdomains: u(prev.subdomains, next.subdomains).sort(),
-        hosts: [...prev.hosts, ...(next.hosts || [])].slice(0, 2000),
-        urls: u(prev.urls, next.urls),
-        emails: u(prev.emails, next.emails),
-        paths: u(prev.paths, next.paths),
-        interesting: u(prev.interesting, next.interesting),
-        github: [...prev.github, ...(next.github || [])],
-        internetdb: [...prev.internetdb, ...(next.internetdb || [])]
-      };
-    });
+    const u = (a, b) => [...new Set([...(a || []), ...(b || [])])];
+    const assetsNext = {
+      ...bag.current.assets,
+      subdomains: u(bag.current.assets.subdomains, next.subdomains).sort(),
+      hosts: [...(bag.current.assets.hosts || []), ...(next.hosts || [])].slice(0, 3000),
+      urls: u(bag.current.assets.urls, next.urls),
+      emails: u(bag.current.assets.emails, next.emails),
+      paths: u(bag.current.assets.paths, next.paths),
+      interesting: u(bag.current.assets.interesting, next.interesting),
+      github: [...(bag.current.assets.github || []), ...(next.github || [])],
+      internetdb: [...(bag.current.assets.internetdb || []), ...(next.internetdb || [])],
+      ranked: next.ranked || bag.current.assets.ranked || [],
+      dns: { ...(bag.current.assets.dns || {}), ...(next.dns || {}) }
+    };
+    bag.current.assets = assetsNext;
+    setAssets(assetsNext);
     if (next.findings?.length) {
-      setFindings((prev) => {
-        const map = new Map(prev.map((f) => [f.id, f]));
-        next.findings.forEach((f) => map.set(f.id, f));
-        return [...map.values()];
-      });
+      const map = new Map(bag.current.findings.map((f) => [f.id, f]));
+      next.findings.forEach((f) => map.set(f.id, f));
+      const list = [...map.values()];
+      bag.current.findings = list;
+      setFindings(list);
     }
   }
 
-  async function run() {
-    if (!authorized) {
-      log("Refused: tick authorized scope first.");
-      return;
-    }
-    if (!domain.trim()) return;
-    setRunning(true);
-    setReport("");
-    log(`Pipeline start for ${domain}`);
-    for (const src of sources) {
-      setStatus((s) => ({ ...s, [src.id]: "on" }));
-      try {
-        const res = await fetch("/api/source", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ domain, source: src.id, authorized: true })
-        });
-        const j = await res.json();
-        if (!res.ok || j.skipped) {
-          setStatus((s) => ({ ...s, [src.id]: "fail" }));
-          log(`${src.id}: ${j.error || j.skipped || res.status}`);
-        } else {
-          setStatus((s) => ({ ...s, [src.id]: "ok" }));
-          merge({
-            subdomains: j.data?.subdomains,
-            hosts: j.data?.hosts,
-            urls: j.data?.urls,
-            emails: j.data?.emails,
-            paths: j.data?.paths,
-            interesting: j.data?.interesting,
-            github: j.data?.hits
-          });
-          log(`${src.id}: ok`);
-        }
-      } catch (e) {
-        setStatus((s) => ({ ...s, [src.id]: "fail" }));
-        log(`${src.id}: ${e.message}`);
-      }
-    }
-
-    const root = domain.replace(/^https?:\/\//, "").replace(/\/.*$/, "");
-    log("HTTP probe on apex");
-    try {
-      const res = await fetch("/api/probe", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ domain: root, host: root, authorized: true })
-      });
-      const j = await res.json();
-      merge({ findings: j.findings, internetdb: j.internetdb });
-      log(`probe: ${j.findings?.length || 0} findings`);
-    } catch (e) {
-      log(`probe failed: ${e.message}`);
-    }
-
-    const snapshot = JSON.parse(localStorage.getItem("xalgo-ops") || "{}");
-    const summary = {
-      subdomainCount: (snapshot.assets?.subdomains || []).length,
-      urlCount: (snapshot.assets?.urls || []).length,
-      interesting: snapshot.assets?.interesting || [],
-      github: snapshot.assets?.github || []
-    };
-    const analyzeRes = await fetch("/api/analyze", {
+  async function post(path, payload) {
+    const res = await fetch(path, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ domain: root, summary, findings: snapshot.findings || findings })
+      body: JSON.stringify({ ...payload, authorized: true })
     });
-    const analyzed = await analyzeRes.json();
-    setReport(analyzed.report || "");
-    setUsedLlm(Boolean(analyzed.usedLlm));
-    log(analyzed.usedLlm ? "Report drafted with configured LLM" : "Report drafted locally (no LLM key in env)");
-    setRunning(false);
-    setTab("findings");
+    const j = await res.json();
+    if (!res.ok) throw new Error(j.error || res.status);
+    return j;
   }
 
+  async function runRecon(root) {
+    setPhase("recon");
+    log(`RECON start ${root}`);
+    const batch = [];
+    for (const src of sources) {
+      batch.push(src);
+      if (batch.length === 3) {
+        await Promise.all(batch.map((s) => runSrc(s, root)));
+        batch.length = 0;
+      }
+    }
+    if (batch.length) await Promise.all(batch.map((s) => runSrc(s, root)));
+  }
+
+  async function runSrc(src, root) {
+    setStatus((s) => ({ ...s, [src.id]: "on" }));
+    try {
+      const j = await post("/api/source", { domain: root, source: src.id });
+      if (j.skipped) {
+        setStatus((s) => ({ ...s, [src.id]: "fail" }));
+        log(`${src.id}: skipped`);
+        return;
+      }
+      setStatus((s) => ({ ...s, [src.id]: "ok" }));
+      merge({
+        subdomains: j.data?.subdomains,
+        hosts: j.data?.hosts,
+        urls: j.data?.urls,
+        emails: j.data?.emails,
+        paths: j.data?.paths,
+        interesting: j.data?.interesting,
+        github: j.data?.hits
+      });
+      const n = (j.data?.subdomains || []).length;
+      log(`${src.id}: ${n} subs`);
+    } catch (e) {
+      setStatus((s) => ({ ...s, [src.id]: "fail" }));
+      log(`${src.id}: ${e.message}`);
+    }
+  }
+
+  function rank(root) {
+    const weights = [
+      [/(^|\.)(admin|portal|dashboard|console|grafana|kibana|jenkins|gitlab|git)/i, 90],
+      [/(^|\.)(dev|stage|staging|test|qa|uat|preprod|sandbox)/i, 80],
+      [/(^|\.)(api|graphql|backend|internal|vpn|owa)/i, 75],
+      [/(^|\.)(s3|bucket|cdn|static)/i, 55],
+      [/(^|\.)(mail|webmail)/i, 50]
+    ];
+    const set = new Set([root, ...bag.current.assets.subdomains]);
+    const ranked = [...set].map((h) => {
+      let score = h === root ? 70 : 20;
+      for (const [re, w] of weights) if (re.test(h)) score += w;
+      return { host: h, score };
+    }).sort((a, b) => b.score - a.score).slice(0, Number(hostLimit) || 8);
+    merge({ ranked });
+    return ranked;
+  }
+
+  async function runDns(root, ranked) {
+    setPhase("dns");
+    log("DNS intel on ranked hosts");
+    for (const item of ranked.slice(0, 6)) {
+      try {
+        const j = await post("/api/dnsintel", { domain: root, host: item.host });
+        merge({ dns: { [item.host]: j.records }, findings: j.findings });
+        log(`dns ${item.host}: ${(j.findings || []).length} notes`);
+      } catch (e) {
+        log(`dns ${item.host}: ${e.message}`);
+      }
+    }
+  }
+
+  async function runVuln(root, ranked) {
+    setPhase("vuln");
+    log(`VULN pack=${pack} hosts=${ranked.length}`);
+    for (const item of ranked) {
+      try {
+        const j = await post("/api/vuln", { domain: root, host: item.host, pack });
+        merge({ findings: j.findings });
+        log(`scan ${item.host}: ${j.findings.length} hits / ${j.templates} templates`);
+      } catch (e) {
+        log(`scan ${item.host}: ${e.message}`);
+      }
+    }
+    if (health?.worker) {
+      log("WORKER_URL set — full Nuclei can run on the worker host, not on Vercel.");
+    }
+  }
+
+  async function runReport(root) {
+    setPhase("report");
+    const summary = {
+      subdomainCount: bag.current.assets.subdomains.length,
+      urlCount: bag.current.assets.urls.length,
+      hostsScanned: (bag.current.assets.ranked || []).length,
+      interesting: bag.current.assets.interesting,
+      github: bag.current.assets.github
+    };
+    const analyzed = await post("/api/analyze", { domain: root, summary, findings: bag.current.findings });
+    setReport(analyzed.report || "");
+    setUsedLlm(Boolean(analyzed.usedLlm));
+    log(analyzed.usedLlm ? "report: LLM" : "report: local writer");
+  }
+
+  async function run(mode) {
+    if (!authorized) return log("Refused: authorize scope first.");
+    const root = domain.trim().toLowerCase().replace(/^https?:\/\//, "").replace(/\/.*$/, "").replace(/^www\./, "");
+    if (!root) return;
+    setRunning(true);
+    if (mode === "full" || mode === "recon") {
+      bag.current = { assets: emptyAssets(), findings: [] };
+      setAssets(emptyAssets());
+      setFindings([]);
+      setReport("");
+      setStatus({});
+    }
+    try {
+      if (mode === "full" || mode === "recon") await runRecon(root);
+      const ranked = rank(root);
+      if (mode === "full" || mode === "recon") await runDns(root, ranked);
+      if (mode === "full" || mode === "vuln") await runVuln(root, ranked.length ? ranked : [{ host: root, score: 70 }]);
+      if (mode === "full" || mode === "report") await runReport(root);
+      setTab(mode === "recon" ? "assets" : "findings");
+    } finally {
+      setRunning(false);
+      setPhase("idle");
+    }
+  }
+
+  function setFindingStatus(id, status) {
+    const list = bag.current.findings.map((f) => f.id === id ? { ...f, status } : f);
+    bag.current.findings = list;
+    setFindings(list);
+  }
+
+  function download(name, text) {
+    const blob = new Blob([text], { type: "text/plain" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = name;
+    a.click();
+  }
+
+  const shown = findings.filter((f) => filter === "all" || f.severity === filter);
   const counts = useMemo(() => ({
     subs: assets.subdomains.length,
     urls: assets.urls.length,
@@ -156,15 +247,16 @@ export default function Page() {
     <div className="app">
       <aside className="side">
         <div className="brand">XALGO<span>-OPS</span></div>
-        <div className="tiny">Authorized recon workbench</div>
+        <div className="tiny">recon → vuln → report</div>
         <div className="nav">
           {["workbench", "assets", "findings", "report", "limits"].map((id) => (
             <button key={id} className={tab === id ? "active" : ""} onClick={() => setTab(id)}>{id}</button>
           ))}
         </div>
         <p className="tiny" style={{ marginTop: 24 }}>
-          LLM baked from env: {health?.llm ? "yes" : "no (heuristic writer)"}<br />
-          Paid keys present: {health ? Object.entries(health.keys || {}).filter(([, v]) => v).map(([k]) => k).join(", ") || "none" : "…"}
+          templates: {health?.templates ?? "…"}<br />
+          LLM env: {health?.llm ? "yes" : "no"}<br />
+          Nuclei worker: {health?.worker ? "configured" : "not attached"}
         </p>
       </aside>
 
@@ -172,24 +264,33 @@ export default function Page() {
         {tab === "workbench" && (
           <>
             <h1>Pipeline</h1>
-            <p className="muted">reconFTW / Osmedeus-style phases, cut down to what Vercel can actually run: passive APIs + light HTTP.</p>
-            <div className="banner">Only scan targets you are allowed to test. Bug bounty scope, written contract, or your own systems. Active exploitation, nuclei, and nmap are not in this deploy.</div>
+            <p className="muted">Phase 1 collects assets. Phase 3 only then scans ranked hosts with HTTP templates. Full Nuclei stays on the optional worker.</p>
+            <div className="banner">Authorized targets only. Template hits are leads, not finished bounty reports.</div>
             <div className="row">
               <input type="text" placeholder="target.com" value={domain} onChange={(e) => setDomain(e.target.value)} />
-              <button className="primary" disabled={running} onClick={run}>{running ? "Running…" : "Run recon"}</button>
-              <button className="ghost" onClick={() => { setAssets({ subdomains: [], hosts: [], urls: [], emails: [], paths: [], interesting: [], github: [], internetdb: [] }); setFindings([]); setReport(""); setStatus({}); }}>Clear</button>
+              <select value={pack} onChange={(e) => setPack(e.target.value)} style={{ background: "#161b24", color: "#e7edf5", border: "1px solid #232a36", padding: "8px", borderRadius: 8 }}>
+                <option value="quick">pack: quick</option>
+                <option value="full">pack: full</option>
+                <option value="secrets">pack: secrets</option>
+                <option value="panels">pack: panels</option>
+              </select>
+              <input type="text" style={{ minWidth: 90 }} value={hostLimit} onChange={(e) => setHostLimit(e.target.value)} title="max hosts" />
+              <button className="primary" disabled={running} onClick={() => run("full")}>{running ? `running ${phase}` : "Run full"}</button>
+              <button className="ghost" disabled={running} onClick={() => run("recon")}>Recon only</button>
+              <button className="ghost" disabled={running} onClick={() => run("vuln")}>Vuln only</button>
+              <button className="ghost" disabled={running} onClick={() => run("report")}>Report only</button>
             </div>
             <label className="check">
               <input type="checkbox" checked={authorized} onChange={(e) => setAuthorized(e.target.checked)} />
-              I am authorized to collect public recon and send light HTTP requests to this domain.
+              I am authorized to recon and send HTTP checks to this domain and its in-scope hosts.
             </label>
             <div className="phase">
-              {PHASES.map((p) => <span key={p.id} className="chip on">{p.label}</span>)}
+              {PHASES.map((p) => <span key={p.id} className={`chip ${phase === p.id ? "on" : ""}`}>{p.label}</span>)}
             </div>
             <div className="phase">
               {sources.map((s) => (
                 <span key={s.id} className={`chip ${status[s.id] === "ok" ? "on" : status[s.id] === "fail" ? "fail" : ""}`}>
-                  {s.label}{s.needsKey ? " · key" : " · free"}
+                  {s.label}{s.needsKey ? " · key" : ""}
                 </span>
               ))}
             </div>
@@ -199,38 +300,55 @@ export default function Page() {
               <div className="stat"><span className="tiny">Findings</span><b>{counts.findings}</b></div>
               <div className="stat"><span className="tiny">High / critical</span><b>{counts.high}</b></div>
             </div>
+            <h3>Ranked scan queue</h3>
+            <pre>{(assets.ranked || []).map((r) => `${r.score}\t${r.host}`).join("\n") || "run recon first"}</pre>
           </>
         )}
 
         {tab === "assets" && (
           <>
             <h1>Assets</h1>
+            <div className="row">
+              <button className="ghost" onClick={() => download(`${domain || "target"}-subs.txt`, assets.subdomains.join("\n"))}>Export subs</button>
+              <button className="ghost" onClick={() => download(`${domain || "target"}-urls.txt`, assets.urls.join("\n"))}>Export URLs</button>
+            </div>
             <h3>Subdomains ({assets.subdomains.length})</h3>
-            <pre>{assets.subdomains.join("\n") || "none yet"}</pre>
-            <h3>Interesting archive URLs</h3>
-            <pre>{(assets.interesting || []).join("\n") || "none yet"}</pre>
-            <h3>GitHub hits</h3>
-            <pre>{(assets.github || []).map((g) => `${g.repo} ${g.path}`).join("\n") || "none yet"}</pre>
-            <h3>InternetDB</h3>
-            <pre>{JSON.stringify(assets.internetdb, null, 2)}</pre>
+            <pre>{assets.subdomains.join("\n") || "none"}</pre>
+            <h3>Interesting URLs</h3>
+            <pre>{(assets.interesting || []).join("\n") || "none"}</pre>
+            <h3>GitHub</h3>
+            <pre>{(assets.github || []).map((g) => `${g.repo} ${g.path}`).join("\n") || "none"}</pre>
           </>
         )}
 
         {tab === "findings" && (
           <>
-            <h1>Findings board</h1>
+            <h1>Findings</h1>
+            <div className="row">
+              {["all", "critical", "high", "medium", "low", "info"].map((s) => (
+                <button key={s} className={filter === s ? "primary" : "ghost"} onClick={() => setFilter(s)}>{s}</button>
+              ))}
+              <button className="ghost" onClick={() => download(`${domain || "target"}-findings.json`, JSON.stringify(findings, null, 2))}>Export JSON</button>
+            </div>
             <table className="table">
-              <thead><tr><th>Sev</th><th>Title</th><th>Asset</th><th>Evidence</th></tr></thead>
+              <thead><tr><th>Sev</th><th>Title</th><th>Asset</th><th>Evidence</th><th>Triage</th></tr></thead>
               <tbody>
-                {findings.map((f) => (
+                {shown.map((f) => (
                   <tr key={f.id}>
                     <td className={`sev ${f.severity}`}>{f.severity}</td>
                     <td>{f.title}</td>
                     <td>{f.asset}</td>
                     <td className="muted">{f.evidence}</td>
+                    <td>
+                      <select value={f.status || "new"} onChange={(e) => setFindingStatus(f.id, e.target.value)} style={{ background: "#161b24", color: "#e7edf5", border: "1px solid #232a36" }}>
+                        <option value="new">new</option>
+                        <option value="confirmed">confirmed</option>
+                        <option value="false-positive">fp</option>
+                      </select>
+                    </td>
                   </tr>
                 ))}
-                {!findings.length && <tr><td colSpan="4" className="muted">No findings yet. Run recon first. Most real bugs still need authenticated manual work.</td></tr>}
+                {!shown.length && <tr><td colSpan="5" className="muted">No findings in this filter.</td></tr>}
               </tbody>
             </table>
           </>
@@ -238,26 +356,27 @@ export default function Page() {
 
         {tab === "report" && (
           <>
-            <h1>Report draft {usedLlm ? "· LLM" : "· local"}</h1>
-            <pre>{report || "Run recon to generate a draft."}</pre>
+            <h1>Report {usedLlm ? "· LLM" : "· local"}</h1>
+            <div className="row">
+              <button className="ghost" onClick={() => download(`${domain || "target"}-report.md`, report || "")}>Download .md</button>
+            </div>
+            <pre>{report || "Run the pipeline to draft a report."}</pre>
           </>
         )}
 
         {tab === "limits" && (
           <>
-            <h1>What this is, and what it is not</h1>
-            <p>Xalgorix, reconFTW, Osmedeus and Vigolium are local/VPS engines. They run nmap, nuclei, browsers, YAML workers, and LLM agents for hours. Vercel is a 10–60s serverless function platform. Those two do not fit.</p>
-            <p>This app is the slice that <em>does</em> belong on a URL: dashboard, free passive APIs, light HTTP checks, finding board, report draft. Optional keys live in Vercel env so the UI never asks for an AI key.</p>
-            <p>For the missing half: run Xalgorix or Vigolium on a VPS, then paste verified findings here. Do not point any of this at systems you do not have permission to test.</p>
+            <h1>Coverage</h1>
+            <p>Vercel runs recon APIs + an HTTP template engine ({health?.templates || 0} checks). That is the accurate serverless half.</p>
+            <p>ProjectDiscovery Nuclei with the public template pack needs a host that can execute binaries. Attach it with <code>WORKER_URL</code> after you run <code>worker/</code> on a VPS. Do not expect nmap/nuclei inside this Vercel function.</p>
+            <p>File only what you reproduced. Template matches on generic paths are often noise.</p>
           </>
         )}
       </main>
 
       <aside className="rail">
         <h3>Live log</h3>
-        <pre style={{ minHeight: 280 }}>{logs.join("\n") || "idle"}</pre>
-        <h3>Notes</h3>
-        <p className="tiny">Free sources can rate-limit. HackerTarget especially. Empty results usually mean throttle, not “no assets”.</p>
+        <pre style={{ minHeight: 320 }}>{logs.join("\n") || "idle"}</pre>
       </aside>
     </div>
   );
