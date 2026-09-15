@@ -1,38 +1,38 @@
 # xalgo-ops
 
-Authorized bug-bounty command center. Dashboard + passive recon + light HTTP checks, deployable on Vercel.
+Authorized bug-bounty command center.
 
-This is **not** a hosted copy of [Xalgorix](https://github.com/xalgorix/xalgorix), reconFTW, Osmedeus, or Vigolium. Those tools need a long-running privileged host (Kali/Docker, nmap, nuclei, browsers, YAML workers). Vercel cannot run that stack.
+Pipeline is fixed: **recon → DNS intel → vuln scan → report**.
 
-What this repo *does* take from them:
+## What runs on Vercel
 
-- Phase layout similar to reconFTW / Osmedeus (OSINT → subdomains → DNS → archives → HTTP → report)
-- Finding board and evidence-first report tone closer to Xalgorix / Vigolium
-- Free/public APIs wired in so a scan works without pasting keys in the UI
+- Passive recon: crt.sh, Cert Spotter, HackerTarget, Anubis, ThreatMiner, OTX, Wayback, urlscan, RDAP, DoH
+- Host ranking (admin/dev/api first)
+- DNS intel: SPF/DMARC/CNAME takeover hints
+- HTTP template scanner (Nuclei-style checks for exposed git/env/actuators/swagger/graphql/panels/backups)
+- Findings board with triage + JSON/MD export
+- Report writer (local heuristic, or Grok/OpenAI/Groq from env — no UI API prompt)
 
-## Run locally
+Live: https://xalgo-ops.vercel.app
+
+## What does *not* run on Vercel
+
+ProjectDiscovery Nuclei with the public template pack, nmap, massdns, sqlmap. Those need a binary host. That is `worker/`.
 
 ```bash
-npm install
-npm run dev
+cd worker
+# nuclei must be on PATH
+WORKER_TOKEN=change-me node server.js
 ```
 
-Open http://localhost:3000
+Set `WORKER_URL` and `WORKER_TOKEN` on the Vercel project if you want the dashboard to know a worker exists.
 
-## Deploy on Vercel
+## Use
 
-Import `nestho/xalgo-ops`. Optional env vars (never prompted in the UI):
+1. Open the app
+2. Enter an in-scope domain
+3. Tick authorization
+4. `Run full` or `Recon only` then `Vuln only`
+5. Triage findings, download the markdown report
 
-- `XAI_API_KEY` / `XAI_MODEL` — Grok report drafting
-- `OPENAI_API_KEY` or `GROQ_API_KEY` — fallback LLM
-- `SECURITYTRAILS_API_KEY`, `VIRUSTOTAL_API_KEY`, `GITHUB_TOKEN`, `URLSCAN_API_KEY`
-
-If no LLM key is set, reports are written by a local heuristic.
-
-## Rules
-
-Only use this on programs you are allowed to test. The API rejects scans unless `authorized: true` is sent. Light HTTP probes hit a short allowlist of paths on the named host. No exploit payloads ship in this app.
-
-## What you still need a VPS for
-
-Xalgorix agent, reconFTW `-a`, Osmedeus flows, Vigolium native/agent scan, massdns/puredns brute, nuclei templates, authenticated DAST. Point those at the same in-scope targets, then bring verified findings back into this board.
+Do not file unverified template hits.
