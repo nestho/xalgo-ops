@@ -1,4 +1,5 @@
 import { SOURCE_CATALOG } from "../../../lib/sources";
+import { TEMPLATES, PACKS } from "../../../lib/templates";
 
 export const runtime = "nodejs";
 
@@ -11,14 +12,19 @@ export async function GET() {
     shodan: Boolean(process.env.SHODAN_API_KEY),
     virustotal: Boolean(process.env.VIRUSTOTAL_API_KEY),
     github: Boolean(process.env.GITHUB_TOKEN),
-    urlscan: Boolean(process.env.URLSCAN_API_KEY)
+    urlscan: Boolean(process.env.URLSCAN_API_KEY),
+    worker: Boolean(process.env.WORKER_URL)
   };
   return Response.json({
     ok: true,
     name: "xalgo-ops",
-    mode: "passive+light-http",
+    version: "1.1.0",
+    mode: "recon-then-vuln",
     llm: keys.xai || keys.openai || keys.groq,
+    worker: keys.worker,
     keys,
-    sources: SOURCE_CATALOG
+    sources: SOURCE_CATALOG,
+    templates: TEMPLATES.length,
+    packs: Object.keys(PACKS)
   });
 }
